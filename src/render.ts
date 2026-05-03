@@ -115,40 +115,32 @@ export function render(markdown: string, width: number): string {
       continue;
     }
 
-    let para = raw;
-    while (
-      i + 1 < lines.length &&
-      lines[i + 1]?.trim() &&
-      !lines[i + 1]!.match(/^(#{1,6}\s|>|[-*]\s|\d+\.\s|```|[-*_]{3,}$)/)
-    ) {
-      i++;
-      para += " " + lines[i]!.trim();
-    }
-    out.push(...wrapLine(styleInline(para), width));
+    out.push(...wrapLine(styleInline(raw), width));
     i++;
   }
 
   return out.join("\n");
 }
 
+import type { Action } from "./browser.ts";
+import type { Mode } from "./extract.ts";
+
 export function renderHeader(
   title: string,
   url: string,
   byline: string | null,
-  isReader: boolean,
+  mode: Mode,
   width: number,
 ): string {
   const lines: string[] = [];
   lines.push(chalk.bold.cyan(title));
-  const meta = [byline, new URL(url).hostname, isReader ? "reader" : "raw"]
+  const meta = [byline, new URL(url).hostname, mode]
     .filter(Boolean)
     .join(" · ");
   if (meta) lines.push(chalk.dim(meta));
   lines.push(chalk.dim("─".repeat(width)));
   return lines.join("\n");
 }
-
-import type { Action } from "./browser.ts";
 
 export function renderActions(actions: Action[], width: number): string {
   if (actions.length === 0) return "";
@@ -165,17 +157,15 @@ export function renderActions(actions: Action[], width: number): string {
 export function renderFooter(
   linkCount: number,
   actionCount: number,
-  width: number,
-  extra?: string,
+  mode: Mode,
+  _width: number,
 ): string {
-  const parts = [
-    `${linkCount} link${linkCount === 1 ? "" : "s"}`,
-  ];
+  const parts = [`${linkCount} link${linkCount === 1 ? "" : "s"}`];
   if (actionCount > 0) {
     parts.push(`${actionCount} action${actionCount === 1 ? "" : "s"}`);
   }
   const counts = parts.join(" · ");
-  const help = `${counts} · type N to follow${actionCount > 0 ? " · cN to click" : ""} · [b]ack [f]wd [r]eload [+]bookmark [:]url [?]help [q]uit`;
-  return chalk.dim("─".repeat(width)) + "\n" + chalk.dim(help) +
-    (extra ? "\n" + chalk.dim(extra) : "");
+  const modeHint = mode === "reader" ? "[R]exit-reader" : "[R]eader";
+  const help = `${counts} · N to follow${actionCount > 0 ? " · cN to click" : ""} · [m]ore [b]ack [f]wd [r]eload [+]bookmark [:]url ${modeHint} [?]help [q]uit`;
+  return chalk.dim(help);
 }

@@ -1,4 +1,5 @@
 import puppeteer, { type Browser, type Page } from "puppeteer";
+import { linearizeInPage } from "./linearize-in-page.ts";
 
 let browser: Browser | null = null;
 let page: Page | null = null;
@@ -27,6 +28,9 @@ export type LoadResult = {
   html: string;
   finalUrl: string;
   title: string;
+  markdown: string;
+  chromeMarkdown: string;
+  links: string[];
   actions: Action[];
   consentDismissed: string | null;
 };
@@ -99,63 +103,32 @@ async function dismissConsent(p: Page): Promise<string | null> {
   return result;
 }
 
-async function tagAndExtractActions(p: Page): Promise<Action[]> {
-  return await p.evaluate(() => {
-    document
-      .querySelectorAll("[data-toad-action]")
-      .forEach((el) => el.removeAttribute("data-toad-action"));
-
-    const candidates = Array.from(
-      document.querySelectorAll(
-        'button, [role="button"], input[type="submit"], input[type="button"]',
-      ),
-    ) as HTMLElement[];
-    const seen = new Set<string>();
-    const out: { id: number; text: string }[] = [];
-    let id = 1;
-
-    for (const el of candidates) {
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
-      const style = getComputedStyle(el);
-      if (
-        style.visibility === "hidden" ||
-        style.display === "none" ||
-        parseFloat(style.opacity) < 0.1
-      )
-        continue;
-
-      let text = (el.textContent || "").trim().replace(/\s+/g, " ");
-      if (!text) text = (el.getAttribute("aria-label") || "").trim();
-      if (!text)
-        text = ((el as HTMLInputElement).value || "").trim();
-      if (!text || text.length > 100) continue;
-
-      const key = text.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      el.setAttribute("data-toad-action", String(id));
-      out.push({ id, text });
-      id++;
-
-      if (out.length >= 30) break;
-    }
-    return out;
-  });
-}
-
 async function snapshot(p: Page): Promise<LoadResult> {
   const consentDismissed = await dismissConsent(p);
-  const actions = await tagAndExtractActions(p);
+  const linearized = await p.evaluate(linearizeInPage);
   const html = await p.content();
   return {
     html,
     finalUrl: p.url(),
     title: await p.title(),
-    actions,
+    markdown: linearized.markdown,
+    chromeMarkdown: linearized.chromeMarkdown,
+    links: linearized.links,
+    actions: linearized.actions,
     consentDismissed,
   };
+}
+
+async function clickAndSnapshot(selector: string): Promise<LoadResult> {
+  const p = await ensurePage();
+  const el = await p.$(selector);
+  if (!el) throw new Error(`Element ${selector} no longer exists on page`);
+  const navP = p
+    .waitForNavigation({ waitUntil: "networkidle2", timeout: 10000 })
+    .catch(() => null);
+  await el.click();
+  await Promise.race([navP, new Promise((r) => setTimeout(r, 1500))]);
+  return snapshot(p);
 }
 
 export async function loadPage(url: string): Promise<LoadResult> {
@@ -164,17 +137,12 @@ export async function loadPage(url: string): Promise<LoadResult> {
   return snapshot(p);
 }
 
+export async function clickLink(id: number): Promise<LoadResult> {
+  return clickAndSnapshot(`[data-toad-link="${id}"]`);
+}
+
 export async function clickAction(id: number): Promise<LoadResult> {
-  const p = await ensurePage();
-  const selector = `[data-toad-action="${id}"]`;
-  const el = await p.$(selector);
-  if (!el) throw new Error(`Action ${id} no longer exists on page`);
-  const navP = p
-    .waitForNavigation({ waitUntil: "networkidle2", timeout: 10000 })
-    .catch(() => null);
-  await el.click();
-  await Promise.race([navP, new Promise((r) => setTimeout(r, 1500))]);
-  return snapshot(p);
+  return clickAndSnapshot(`[data-toad-action="${id}"]`);
 }
 
 export async function shutdown(): Promise<void> {

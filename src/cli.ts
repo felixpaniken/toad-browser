@@ -2,8 +2,14 @@
 import readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import chalk from "chalk";
-import { loadPage, clickAction, shutdown } from "./browser.ts";
-import { extract, type Extracted } from "./extract.ts";
+import {
+  loadPage,
+  clickLink,
+  clickAction,
+  shutdown,
+  type LoadResult,
+} from "./browser.ts";
+import { extract, type Extracted, type Mode } from "./extract.ts";
 import { render, renderHeader, renderFooter, renderActions } from "./render.ts";
 import {
   loadBookmarks,
@@ -16,10 +22,64 @@ import { startSpinner } from "./spinner.ts";
 
 type View =
   | { kind: "startpage"; bookmarks: Bookmark[]; links: string[] }
-  | { kind: "page"; data: Extracted };
+  | { kind: "page"; load: LoadResult; data: Extracted };
 
 let current: View | null = null;
 const history = new History();
+
+type Pager = {
+  lines: string[];
+  cursor: number;
+  chromeLines: string[];
+  helpLine: string;
+  width: number;
+};
+let pager: Pager | null = null;
+
+function chunkSize(): number {
+  return Math.max(15, (stdout.rows || 30) - 8);
+}
+
+function printFooterBlock(p: Pager, isLast: boolean): void {
+  if (isLast && p.chromeLines.length > 0) {
+    console.log();
+    console.log(chalk.dim("─".repeat(p.width)));
+    console.log(chalk.bold.green("Page chrome"));
+    for (const line of p.chromeLines) console.log(line);
+  }
+  console.log();
+  console.log(chalk.dim("─".repeat(p.width)));
+  console.log(p.helpLine);
+  if (isLast) {
+    console.log(chalk.dim(`(end · ${p.lines.length} lines)`));
+  } else {
+    console.log(
+      chalk.dim(
+        `(showing 1-${p.cursor} of ${p.lines.length} · type \`m\` for more)`,
+      ),
+    );
+  }
+}
+
+function showNextChunk(): void {
+  if (!pager) return;
+  if (!stdout.isTTY) {
+    for (let i = pager.cursor; i < pager.lines.length; i++) {
+      console.log(pager.lines[i]);
+    }
+    pager.cursor = pager.lines.length;
+    printFooterBlock(pager, true);
+    pager = null;
+    return;
+  }
+  const size = chunkSize();
+  const end = Math.min(pager.cursor + size, pager.lines.length);
+  for (let i = pager.cursor; i < end; i++) console.log(pager.lines[i]);
+  pager.cursor = end;
+  const isLast = end >= pager.lines.length;
+  printFooterBlock(pager, isLast);
+  if (isLast) pager = null;
+}
 
 function termWidth(): number {
   return Math.min(stdout.columns || 80, 100);
@@ -35,34 +95,37 @@ async function buildStartpage(): Promise<View> {
   return { kind: "startpage", bookmarks, links: bookmarks.map((b) => b.url) };
 }
 
+function viewFromLoad(load: LoadResult, mode: Mode = "page"): View {
+  const data = extract(load, mode);
+  return { kind: "page", load, data };
+}
+
 async function buildPage(url: string): Promise<View> {
   const norm = normalizeUrl(url);
   const stop = startSpinner("Toading");
   try {
-    const result = await loadPage(norm);
-    const data = extract({
-      html: result.html,
-      baseUrl: result.finalUrl,
-      actions: result.actions,
-      consentDismissed: result.consentDismissed,
-    });
-    return { kind: "page", data };
+    const load = await loadPage(norm);
+    return viewFromLoad(load);
   } finally {
     stop();
   }
 }
 
-async function performClick(actionId: number): Promise<View> {
+async function performClickLink(linkId: number): Promise<View> {
   const stop = startSpinner("Toading");
   try {
-    const result = await clickAction(actionId);
-    const data = extract({
-      html: result.html,
-      baseUrl: result.finalUrl,
-      actions: result.actions,
-      consentDismissed: result.consentDismissed,
-    });
-    return { kind: "page", data };
+    const load = await clickLink(linkId);
+    return viewFromLoad(load);
+  } finally {
+    stop();
+  }
+}
+
+async function performClickAction(actionId: number): Promise<View> {
+  const stop = startSpinner("Toading");
+  try {
+    const load = await clickAction(actionId);
+    return viewFromLoad(load);
   } finally {
     stop();
   }
@@ -99,18 +162,31 @@ function printPage(view: Extract<View, { kind: "page" }>): void {
   const w = termWidth();
   const { data } = view;
   console.log();
-  console.log(
-    renderHeader(data.title, data.url, data.byline, data.isReaderMode, w),
-  );
+  console.log(renderHeader(data.title, data.url, data.byline, data.mode, w));
   if (data.consentDismissed) {
-    console.log(chalk.dim(`(auto-dismissed cookie banner: "${data.consentDismissed}")`));
+    console.log(
+      chalk.dim(`(auto-dismissed cookie banner: "${data.consentDismissed}")`),
+    );
+  }
+  if (data.mode === "reader" && !data.readerAvailable) {
+    console.log(chalk.yellow("(no readable article found — showing page view)"));
   }
   console.log();
-  console.log(render(data.content, w));
+
+  const bodyLines = render(data.content, w).split("\n");
   const actionsBlock = renderActions(data.actions, w);
-  if (actionsBlock) console.log(actionsBlock);
-  console.log();
-  console.log(renderFooter(data.links.length, data.actions.length, w));
+  const lines = actionsBlock
+    ? bodyLines.concat([""], actionsBlock.split("\n"))
+    : bodyLines;
+  const chromeLines = data.chrome ? render(data.chrome, w).split("\n") : [];
+  const helpLine = renderFooter(
+    data.links.length,
+    data.actions.length,
+    data.mode,
+    w,
+  );
+  pager = { lines, cursor: 0, chromeLines, helpLine, width: w };
+  showNextChunk();
 }
 
 function printCurrent(): void {
@@ -131,18 +207,66 @@ async function navigate(entry: HistoryEntry, push: boolean): Promise<void> {
 
 async function follow(n: number): Promise<void> {
   if (!current) return;
-  const links =
-    current.kind === "startpage" ? current.links : current.data.links;
-  const url = links[n - 1];
+  if (current.kind === "startpage") {
+    const url = current.links[n - 1];
+    if (!url) {
+      console.log(chalk.dim(`(no link ${n})`));
+      return;
+    }
+    try {
+      await navigate({ kind: "url", url }, true);
+    } catch (err) {
+      console.log(chalk.red(`Failed to load: ${(err as Error).message}`));
+    }
+    return;
+  }
+
+  // page view: reader mode has no DOM selectors, just URL strings
+  if (current.data.mode === "reader") {
+    const url = current.data.links[n - 1];
+    if (!url) {
+      console.log(chalk.dim(`(no link ${n})`));
+      return;
+    }
+    try {
+      await navigate({ kind: "url", url }, true);
+    } catch (err) {
+      console.log(chalk.red(`Failed to load: ${(err as Error).message}`));
+    }
+    return;
+  }
+
+  // page mode: click via tagged selector
+  const url = current.data.links[n - 1];
   if (!url) {
     console.log(chalk.dim(`(no link ${n})`));
     return;
   }
+  const previousUrl = current.data.url;
   try {
-    await navigate({ kind: "url", url }, true);
+    const newView = await performClickLink(n);
+    current = newView;
+    if (newView.kind === "page" && newView.data.url !== previousUrl) {
+      history.push({ kind: "url", url: newView.data.url });
+    }
+    printCurrent();
   } catch (err) {
-    console.log(chalk.red(`Failed to load: ${(err as Error).message}`));
+    console.log(chalk.red((err as Error).message));
   }
+}
+
+function toggleReader(): void {
+  if (current?.kind !== "page") {
+    console.log(chalk.dim("(no page to toggle)"));
+    return;
+  }
+  const nextMode: Mode = current.data.mode === "reader" ? "page" : "reader";
+  current = {
+    kind: "page",
+    load: current.load,
+    data: extract(current.load, nextMode),
+  };
+  printCurrent();
 }
 
 function printHelp(): void {
@@ -150,6 +274,9 @@ function printHelp(): void {
   console.log(chalk.bold("Commands:"));
   console.log("  N         follow link/bookmark number N");
   console.log("  cN        click action (button) number N");
+  console.log("  m         next page of long output");
+  console.log("  mm        rest of long output, all at once");
+  console.log("  R         toggle reader mode for current page");
   console.log("  :URL      go to URL");
   console.log("  b         back");
   console.log("  f         forward");
@@ -202,6 +329,29 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
       await navigate(e, false);
     } catch (err) {
       console.log(chalk.red(`Failed to reload: ${(err as Error).message}`));
+    }
+    return "continue";
+  }
+
+  if (cmd === "R" || cmd === "reader") {
+    toggleReader();
+    return "continue";
+  }
+
+  if (cmd === "m" || cmd === "more") {
+    if (!pager) {
+      console.log(chalk.dim("(nothing more to show)"));
+    } else {
+      showNextChunk();
+    }
+    return "continue";
+  }
+
+  if (cmd === "mm" || cmd === "all") {
+    if (!pager) {
+      console.log(chalk.dim("(nothing more to show)"));
+    } else {
+      while (pager) showNextChunk();
     }
     return "continue";
   }
@@ -263,7 +413,7 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
     }
     const previousUrl = current.data.url;
     try {
-      const newView = await performClick(id);
+      const newView = await performClickAction(id);
       current = newView;
       if (newView.kind === "page" && newView.data.url !== previousUrl) {
         history.push({ kind: "url", url: newView.data.url });
