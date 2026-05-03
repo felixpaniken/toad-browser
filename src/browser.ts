@@ -18,6 +18,15 @@ async function ensurePage(): Promise<Page> {
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     );
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const type = req.resourceType();
+      if (type === "image" || type === "font" || type === "media") {
+        req.abort().catch(() => {});
+      } else {
+        req.continue().catch(() => {});
+      }
+    });
   }
   return page;
 }
@@ -124,16 +133,22 @@ async function clickAndSnapshot(selector: string): Promise<LoadResult> {
   const el = await p.$(selector);
   if (!el) throw new Error(`Element ${selector} no longer exists on page`);
   const navP = p
-    .waitForNavigation({ waitUntil: "networkidle2", timeout: 10000 })
+    .waitForNavigation({ waitUntil: "load", timeout: 10000 })
     .catch(() => null);
-  await el.click();
-  await Promise.race([navP, new Promise((r) => setTimeout(r, 1500))]);
+  try {
+    await el.click();
+  } catch {
+    // Fall back to a DOM-level click for elements that Puppeteer's
+    // real-mouse-click can't reach (offscreen, occluded, non-standard).
+    await el.evaluate((e) => (e as HTMLElement).click());
+  }
+  await Promise.race([navP, new Promise((r) => setTimeout(r, 1000))]);
   return snapshot(p);
 }
 
 export async function loadPage(url: string): Promise<LoadResult> {
   const p = await ensurePage();
-  await p.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+  await p.goto(url, { waitUntil: "load", timeout: 15000 });
   return snapshot(p);
 }
 
