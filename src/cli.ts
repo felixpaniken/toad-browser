@@ -4,8 +4,8 @@ import { stdin, stdout } from "node:process";
 import chalk from "chalk";
 import {
   loadPage,
-  clickLink,
   clickAction,
+  getDiagnostics,
   shutdown,
   type LoadResult,
 } from "./browser.ts";
@@ -111,16 +111,6 @@ async function buildPage(url: string): Promise<View> {
   }
 }
 
-async function performClickLink(linkId: number): Promise<View> {
-  const stop = startSpinner("Toading");
-  try {
-    const load = await clickLink(linkId);
-    return viewFromLoad(load);
-  } finally {
-    stop();
-  }
-}
-
 async function performClickAction(actionId: number): Promise<View> {
   const stop = startSpinner("Toading");
   try {
@@ -207,52 +197,102 @@ async function navigate(entry: HistoryEntry, push: boolean): Promise<void> {
 
 async function follow(n: number): Promise<void> {
   if (!current) return;
-  if (current.kind === "startpage") {
-    const url = current.links[n - 1];
-    if (!url) {
-      console.log(chalk.dim(`(no link ${n})`));
-      return;
-    }
-    try {
-      await navigate({ kind: "url", url }, true);
-    } catch (err) {
-      console.log(chalk.red(`Failed to load: ${(err as Error).message}`));
-    }
-    return;
-  }
-
-  // page view: reader mode has no DOM selectors, just URL strings
-  if (current.data.mode === "reader") {
-    const url = current.data.links[n - 1];
-    if (!url) {
-      console.log(chalk.dim(`(no link ${n})`));
-      return;
-    }
-    try {
-      await navigate({ kind: "url", url }, true);
-    } catch (err) {
-      console.log(chalk.red(`Failed to load: ${(err as Error).message}`));
-    }
-    return;
-  }
-
-  // page mode: click via tagged selector
-  const url = current.data.links[n - 1];
+  const links =
+    current.kind === "startpage" ? current.links : current.data.links;
+  const url = links[n - 1];
   if (!url) {
     console.log(chalk.dim(`(no link ${n})`));
     return;
   }
-  const previousUrl = current.data.url;
   try {
-    const newView = await performClickLink(n);
-    current = newView;
-    if (newView.kind === "page" && newView.data.url !== previousUrl) {
-      history.push({ kind: "url", url: newView.data.url });
-    }
-    printCurrent();
+    await navigate({ kind: "url", url }, true);
   } catch (err) {
-    console.log(chalk.red((err as Error).message));
+    console.log(chalk.red(`Failed to load: ${(err as Error).message}`));
   }
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function printDebug(
+  view: Extract<View, { kind: "page" }>,
+): Promise<void> {
+  const diag = await getDiagnostics();
+  const status = view.load.httpStatus;
+  console.log();
+  console.log(chalk.bold.cyan("Debug"));
+  console.log(chalk.dim("─".repeat(termWidth())));
+  console.log(`  URL:           ${diag.url}`);
+  console.log(`  Title:         ${diag.title || chalk.dim("(none)")}`);
+  console.log(
+    `  HTTP status:   ${
+      status === null
+        ? chalk.dim("(unknown)")
+        : status >= 200 && status < 300
+          ? chalk.green(String(status))
+          : chalk.yellow(String(status))
+    }`,
+  );
+  console.log(`  HTML size:     ${formatBytes(diag.htmlBytes)}`);
+  console.log(`  Body text:     ${diag.bodyTextLength} chars`);
+  console.log(
+    `  DOM elements:  ${diag.totalElements} total · ${chalk.green(
+      String(diag.visibleElements),
+    )} visible · ${chalk.dim(
+      String(diag.totalElements - diag.visibleElements),
+    )} hidden`,
+  );
+  if (diag.totalElements - diag.visibleElements > 0) {
+    const parts: string[] = [];
+    if (diag.hiddenByDisplay) parts.push(`display:none ${diag.hiddenByDisplay}`);
+    if (diag.hiddenByVisibility)
+      parts.push(`visibility:hidden ${diag.hiddenByVisibility}`);
+    if (diag.hiddenByOpacity) parts.push(`opacity<.05 ${diag.hiddenByOpacity}`);
+    if (diag.hiddenByZeroSize)
+      parts.push(`zero-size ${diag.hiddenByZeroSize}`);
+    if (diag.hiddenByAria) parts.push(`aria-hidden ${diag.hiddenByAria}`);
+    console.log(chalk.dim(`                 ${parts.join(" · ")}`));
+  }
+  if (diag.iframeCount > 0) {
+    console.log(
+      `  ${chalk.yellow("Iframes:")}      ${diag.iframeCount} (skipped by Toad)`,
+    );
+    for (const u of diag.iframeUrls.slice(0, 3)) {
+      console.log(chalk.dim(`                 ${u}`));
+    }
+  }
+  if (diag.shadowRootHosts > 0) {
+    console.log(
+      `  ${chalk.yellow("Shadow roots:")} ${diag.shadowRootHosts} (not traversed)`,
+    );
+  }
+  console.log(`  Tags:`);
+  const entries = Object.entries(diag.tagCounts);
+  const lines: string[] = [];
+  let cur = "    ";
+  for (const [tag, count] of entries) {
+    const item = `<${tag}>:${count}`;
+    if (cur.length + item.length + 2 > termWidth()) {
+      lines.push(cur);
+      cur = "    ";
+    }
+    if (cur === "    ") cur += item;
+    else cur += "  " + item;
+  }
+  if (cur.trim()) lines.push(cur);
+  for (const l of lines) console.log(chalk.dim(l));
+  console.log(
+    `  Linearized:    ${view.data.links.length} links · ${view.data.actions.length} actions`,
+  );
+  if (view.data.consentDismissed) {
+    console.log(
+      `  Cookie banner: ${chalk.green("dismissed")} ("${view.data.consentDismissed}")`,
+    );
+  }
+  console.log();
 }
 
 function toggleReader(): void {
@@ -277,6 +317,7 @@ function printHelp(): void {
   console.log("  m         next page of long output");
   console.log("  mm        rest of long output, all at once");
   console.log("  R         toggle reader mode for current page");
+  console.log("  :debug    show DOM/HTTP diagnostics for current page");
   console.log("  :URL      go to URL");
   console.log("  b         back");
   console.log("  f         forward");
@@ -335,6 +376,19 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
 
   if (cmd === "R" || cmd === "reader") {
     toggleReader();
+    return "continue";
+  }
+
+  if (cmd === ":debug" || cmd === "debug") {
+    if (current?.kind !== "page") {
+      console.log(chalk.dim("(no page loaded — go somewhere first)"));
+      return "continue";
+    }
+    try {
+      await printDebug(current);
+    } catch (err) {
+      console.log(chalk.red((err as Error).message));
+    }
     return "continue";
   }
 

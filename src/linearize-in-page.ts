@@ -88,7 +88,6 @@ export function linearizeInPage(): LinearizeResult {
     if ((el as HTMLElement).hidden) return true;
     const s = getComputedStyle(el);
     if (s.display === "none" || s.visibility === "hidden") return true;
-    if (parseFloat(s.opacity || "1") < 0.05) return true;
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) return true;
     return false;
@@ -112,6 +111,21 @@ export function linearizeInPage(): LinearizeResult {
     if (visible.length === 1 && !/[\p{L}\p{N}]/u.test(visible)) return false;
     if (visible.length > 200) return false;
     return true;
+  }
+
+  function readLabel(el: Element): string {
+    let text = (el.textContent || "").replace(/\s+/g, " ").trim();
+    if (text) return text;
+    const aria = (el.getAttribute("aria-label") || "").trim();
+    if (aria) return aria;
+    const title = (el.getAttribute("title") || "").trim();
+    if (title) return title;
+    const img = el.querySelector("img");
+    if (img) {
+      const alt = (img.getAttribute("alt") || "").trim();
+      if (alt) return alt;
+    }
+    return "";
   }
 
   function walkChildren(el: Element): void {
@@ -175,9 +189,7 @@ export function linearizeInPage(): LinearizeResult {
           walkChildren(el);
           return;
         }
-        const text = (el.textContent || "")
-          .replace(/\s+/g, " ")
-          .trim();
+        const text = readLabel(el);
         if (!isUsableLinkText(text)) return;
 
         let n = linkMap.get(url);
@@ -193,10 +205,7 @@ export function linearizeInPage(): LinearizeResult {
       }
       case "BUTTON":
       case "SUMMARY": {
-        let text = (el.textContent || "")
-          .replace(/\s+/g, " ")
-          .trim();
-        if (!text) text = (el.getAttribute("aria-label") || "").trim();
+        const text = readLabel(el);
         if (!text || text.length > 100) return;
         actions.push({ id: actions.length + 1, text });
         const n = actions.length;
@@ -370,7 +379,7 @@ export function linearizeInPage(): LinearizeResult {
           for (const c of Array.from(e.childNodes)) visit(c);
           return;
         }
-        const text = (e.textContent || "").replace(/\s+/g, " ").trim();
+        const text = readLabel(e);
         if (!isUsableLinkText(text)) return;
 
         let n = linkMap.get(url);
@@ -385,8 +394,7 @@ export function linearizeInPage(): LinearizeResult {
       }
 
       if (tag === "BUTTON" || tag === "SUMMARY") {
-        let text = (e.textContent || "").replace(/\s+/g, " ").trim();
-        if (!text) text = (e.getAttribute("aria-label") || "").trim();
+        const text = readLabel(e);
         if (!text || text.length > 100) return;
         actions.push({ id: actions.length + 1, text });
         const n = actions.length;

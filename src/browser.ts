@@ -42,6 +42,25 @@ export type LoadResult = {
   links: string[];
   actions: Action[];
   consentDismissed: string | null;
+  httpStatus: number | null;
+};
+
+export type Diagnostics = {
+  url: string;
+  title: string;
+  htmlBytes: number;
+  bodyTextLength: number;
+  totalElements: number;
+  visibleElements: number;
+  hiddenByDisplay: number;
+  hiddenByVisibility: number;
+  hiddenByOpacity: number;
+  hiddenByZeroSize: number;
+  hiddenByAria: number;
+  iframeCount: number;
+  iframeUrls: string[];
+  shadowRootHosts: number;
+  tagCounts: Record<string, number>;
 };
 
 const REJECT_PATTERNS: string[] = [
@@ -112,7 +131,10 @@ async function dismissConsent(p: Page): Promise<string | null> {
   return result;
 }
 
-async function snapshot(p: Page): Promise<LoadResult> {
+async function snapshot(
+  p: Page,
+  httpStatus: number | null,
+): Promise<LoadResult> {
   const consentDismissed = await dismissConsent(p);
   const linearized = await p.evaluate(linearizeInPage);
   const html = await p.content();
@@ -125,6 +147,7 @@ async function snapshot(p: Page): Promise<LoadResult> {
     links: linearized.links,
     actions: linearized.actions,
     consentDismissed,
+    httpStatus,
   };
 }
 
@@ -142,22 +165,118 @@ async function clickAndSnapshot(selector: string): Promise<LoadResult> {
     // real-mouse-click can't reach (offscreen, occluded, non-standard).
     await el.evaluate((e) => (e as HTMLElement).click());
   }
-  await Promise.race([navP, new Promise((r) => setTimeout(r, 1000))]);
-  return snapshot(p);
+  const response = await Promise.race([
+    navP,
+    new Promise<null>((r) => setTimeout(() => r(null), 1000)),
+  ]);
+  return snapshot(p, response?.status() ?? null);
 }
 
 export async function loadPage(url: string): Promise<LoadResult> {
   const p = await ensurePage();
-  await p.goto(url, { waitUntil: "load", timeout: 15000 });
-  return snapshot(p);
-}
-
-export async function clickLink(id: number): Promise<LoadResult> {
-  return clickAndSnapshot(`[data-toad-link="${id}"]`);
+  const response = await p.goto(url, { waitUntil: "load", timeout: 15000 });
+  return snapshot(p, response?.status() ?? null);
 }
 
 export async function clickAction(id: number): Promise<LoadResult> {
   return clickAndSnapshot(`[data-toad-action="${id}"]`);
+}
+
+export async function getDiagnostics(): Promise<Diagnostics> {
+  const p = await ensurePage();
+  return p.evaluate(() => {
+    const all = Array.from(document.querySelectorAll("*"));
+    const counts: Record<string, number> = {};
+    let hiddenByDisplay = 0;
+    let hiddenByVisibility = 0;
+    let hiddenByOpacity = 0;
+    let hiddenByZeroSize = 0;
+    let hiddenByAria = 0;
+    let visible = 0;
+    for (const el of all) {
+      const tag = el.tagName.toLowerCase();
+      counts[tag] = (counts[tag] || 0) + 1;
+      let isHidden = false;
+      if (el.getAttribute("aria-hidden") === "true") {
+        hiddenByAria++;
+        isHidden = true;
+      }
+      const s = getComputedStyle(el);
+      if (s.display === "none") {
+        if (!isHidden) hiddenByDisplay++;
+        isHidden = true;
+      }
+      if (s.visibility === "hidden") {
+        if (!isHidden) hiddenByVisibility++;
+        isHidden = true;
+      }
+      if (parseFloat(s.opacity || "1") < 0.05) {
+        if (!isHidden) hiddenByOpacity++;
+        isHidden = true;
+      }
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) {
+        if (!isHidden) hiddenByZeroSize++;
+        isHidden = true;
+      }
+      if (!isHidden) visible++;
+    }
+    const interesting = [
+      "html",
+      "body",
+      "main",
+      "article",
+      "section",
+      "header",
+      "footer",
+      "nav",
+      "aside",
+      "div",
+      "p",
+      "h1",
+      "h2",
+      "h3",
+      "a",
+      "button",
+      "input",
+      "img",
+      "iframe",
+      "form",
+      "ul",
+      "ol",
+      "li",
+      "table",
+    ];
+    const tagBreakdown: Record<string, number> = {};
+    for (const t of interesting) {
+      if (counts[t]) tagBreakdown[t] = counts[t];
+    }
+    const iframes = Array.from(
+      document.querySelectorAll("iframe"),
+    ) as HTMLIFrameElement[];
+    const iframeUrls = iframes.map((f) => f.src).filter(Boolean).slice(0, 10);
+    let shadowHosts = 0;
+    for (const el of all) {
+      if ((el as Element & { shadowRoot?: ShadowRoot }).shadowRoot) shadowHosts++;
+    }
+    return {
+      url: location.href,
+      title: document.title,
+      htmlBytes: document.documentElement.outerHTML.length,
+      bodyTextLength: (document.body?.innerText || "").length,
+      totalElements: all.length,
+      visibleElements: visible,
+      hiddenByDisplay,
+      hiddenByVisibility,
+      hiddenByOpacity,
+      hiddenByZeroSize,
+      hiddenByAria,
+      iframeCount: iframes.length,
+      iframeUrls,
+      shadowRootHosts: shadowHosts,
+      tagCounts: tagBreakdown,
+    };
+  });
 }
 
 export async function shutdown(): Promise<void> {
