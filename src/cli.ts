@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import readline from "node:readline/promises";
+import readline from "node:readline";
 import { stdin, stdout } from "node:process";
 import chalk from "chalk";
 import {
   loadPage,
   clickAction,
   getDiagnostics,
+  inspect,
   shutdown,
   type LoadResult,
 } from "./browser.ts";
@@ -19,6 +20,14 @@ import {
 } from "./bookmarks.ts";
 import { History, type HistoryEntry } from "./history.ts";
 import { startSpinner } from "./spinner.ts";
+import {
+  loadLilypad,
+  addHide,
+  removeHide,
+  setContent,
+  lilypadPath,
+  type Lilypad,
+} from "./lilypad.ts";
 
 type View =
   | { kind: "startpage"; bookmarks: Bookmark[]; links: string[] }
@@ -100,11 +109,30 @@ function viewFromLoad(load: LoadResult, mode: Mode = "page"): View {
   return { kind: "page", load, data };
 }
 
+function hostnameOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+async function lilypadOptionsFor(host: string): Promise<{
+  hide: string[];
+  content: string | null;
+}> {
+  if (!host) return { hide: [], content: null };
+  const pad = await loadLilypad(host);
+  return { hide: pad.hide, content: pad.content };
+}
+
 async function buildPage(url: string): Promise<View> {
   const norm = normalizeUrl(url);
   const stop = startSpinner("Toading");
   try {
-    const load = await loadPage(norm);
+    const load = await loadPage(norm, {
+      resolveOptions: (host) => lilypadOptionsFor(host),
+    });
     return viewFromLoad(load);
   } finally {
     stop();
@@ -114,7 +142,9 @@ async function buildPage(url: string): Promise<View> {
 async function performClickAction(actionId: number): Promise<View> {
   const stop = startSpinner("Toading");
   try {
-    const load = await clickAction(actionId);
+    const load = await clickAction(actionId, {
+      resolveOptions: (host) => lilypadOptionsFor(host),
+    });
     return viewFromLoad(load);
   } finally {
     stop();
@@ -317,6 +347,11 @@ function printHelp(): void {
   console.log("  m         next page of long output");
   console.log("  mm        rest of long output, all at once");
   console.log("  R         toggle reader mode for current page");
+  console.log("  i N      inspect link N (or i cN for action N)");
+  console.log("  :hide S  add selector S to this site's lilypad");
+  console.log("  :unhide S  remove selector S from this site's lilypad");
+  console.log("  :content S  set content root selector for this site");
+  console.log("  :lilypad  show this site's lilypad rules");
   console.log("  :debug    show DOM/HTTP diagnostics for current page");
   console.log("  :URL      go to URL");
   console.log("  b         back");
@@ -327,6 +362,89 @@ function printHelp(): void {
   console.log("  s         go to startpage");
   console.log("  ?         this help");
   console.log("  q         quit");
+  console.log();
+}
+
+async function printInspect(token: string): Promise<void> {
+  if (current?.kind !== "page") {
+    console.log(chalk.dim("(no page to inspect)"));
+    return;
+  }
+  let selector: string;
+  let label: string;
+  if (token.toLowerCase().startsWith("c")) {
+    const id = parseInt(token.slice(1), 10);
+    if (!Number.isFinite(id)) {
+      console.log(chalk.dim(`(unknown target ${token})`));
+      return;
+    }
+    selector = `[data-toad-action="${id}"]`;
+    label = `action c${id}`;
+  } else {
+    const id = parseInt(token, 10);
+    if (!Number.isFinite(id)) {
+      console.log(chalk.dim(`(unknown target ${token})`));
+      return;
+    }
+    selector = `[data-toad-link="${id}"]`;
+    label = `link [${id}]`;
+  }
+  const result = await inspect(selector);
+  if (!result.found) {
+    console.log(chalk.dim(`(${label} no longer on page)`));
+    return;
+  }
+  console.log();
+  console.log(chalk.bold(`Inspect ${label}`));
+  console.log(chalk.dim("─".repeat(termWidth())));
+  console.log(`  Text:     "${result.text}"`);
+  console.log(`  Element:  ${chalk.cyan(result.self.selector)}`);
+  if (result.ancestors.length === 0) {
+    console.log(chalk.dim("  (no ancestors above body)"));
+  } else {
+    console.log(`  Ancestors (closest first):`);
+    for (const a of result.ancestors) {
+      const counts: string[] = [];
+      if (a.linkCount > 0)
+        counts.push(`${a.linkCount} link${a.linkCount === 1 ? "" : "s"}`);
+      if (a.actionCount > 0)
+        counts.push(
+          `${a.actionCount} action${a.actionCount === 1 ? "" : "s"}`,
+        );
+      const summary = counts.length > 0 ? chalk.dim(` — ${counts.join(", ")}`) : "";
+      console.log(`    ${chalk.cyan(a.selector)}${summary}`);
+    }
+  }
+  console.log(
+    chalk.dim(`  type \`:hide <selector>\` to add a hide rule for this site`),
+  );
+  console.log();
+}
+
+function currentHostname(): string | null {
+  if (current?.kind !== "page") return null;
+  return hostnameOf(current.data.url);
+}
+
+async function printLilypad(): Promise<void> {
+  const host = currentHostname();
+  if (!host) {
+    console.log(chalk.dim("(no page loaded)"));
+    return;
+  }
+  const pad = await loadLilypad(host);
+  console.log();
+  console.log(chalk.bold(`Lilypad for ${host}`));
+  console.log(chalk.dim(lilypadPath(host)));
+  if (pad.hide.length === 0 && !pad.content) {
+    console.log(chalk.dim("  (no rules — add some with :hide or :content)"));
+  } else {
+    if (pad.content) console.log(`  content: ${chalk.cyan(pad.content)}`);
+    if (pad.hide.length > 0) {
+      console.log(`  hide:`);
+      for (const s of pad.hide) console.log(`    ${chalk.cyan(s)}`);
+    }
+  }
   console.log();
 }
 
@@ -388,6 +506,78 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
       await printDebug(current);
     } catch (err) {
       console.log(chalk.red((err as Error).message));
+    }
+    return "continue";
+  }
+
+  const inspectMatch = cmd.match(/^i\s+([cC]?\d+)$/);
+  if (inspectMatch) {
+    try {
+      await printInspect(inspectMatch[1]!);
+    } catch (err) {
+      console.log(chalk.red((err as Error).message));
+    }
+    return "continue";
+  }
+
+  if (cmd === ":lilypad" || cmd === "lilypad") {
+    await printLilypad();
+    return "continue";
+  }
+
+  if (cmd.startsWith(":hide ")) {
+    const host = currentHostname();
+    if (!host) {
+      console.log(chalk.dim("(no page loaded)"));
+      return "continue";
+    }
+    const selector = cmd.slice(":hide ".length).trim();
+    if (!selector) {
+      console.log(chalk.dim("(usage: :hide <selector>)"));
+      return "continue";
+    }
+    await addHide(host, selector);
+    console.log(
+      chalk.green(`Added "${selector}" to ${host}'s lilypad. Reload (r) to apply.`),
+    );
+    return "continue";
+  }
+
+  if (cmd.startsWith(":unhide ")) {
+    const host = currentHostname();
+    if (!host) {
+      console.log(chalk.dim("(no page loaded)"));
+      return "continue";
+    }
+    const selector = cmd.slice(":unhide ".length).trim();
+    if (!selector) {
+      console.log(chalk.dim("(usage: :unhide <selector>)"));
+      return "continue";
+    }
+    await removeHide(host, selector);
+    console.log(
+      chalk.green(`Removed "${selector}" from ${host}'s lilypad. Reload (r) to apply.`),
+    );
+    return "continue";
+  }
+
+  if (cmd.startsWith(":content")) {
+    const host = currentHostname();
+    if (!host) {
+      console.log(chalk.dim("(no page loaded)"));
+      return "continue";
+    }
+    const rest = cmd.slice(":content".length).trim();
+    if (!rest) {
+      await setContent(host, null);
+      console.log(
+        chalk.green(`Cleared content selector for ${host}. Reload (r) to apply.`),
+      );
+    } else {
+      await setContent(host, rest);
+      console.log(
+        chalk.green(`Set content selector for ${host} to "${rest}". Reload (r) to apply.`),
+      );
     }
     return "continue";
   }
@@ -507,7 +697,31 @@ async function main(): Promise<void> {
     await navigate({ kind: "startpage" }, true);
   }
 
-  const rl = readline.createInterface({ input: stdin, output: stdout });
+  const rl = readline.createInterface({
+    input: stdin,
+    output: stdout,
+    terminal: stdout.isTTY,
+  });
+
+  const queued: string[] = [];
+  const waiters: ((line: string | null) => void)[] = [];
+  let closed = false;
+
+  rl.on("line", (line) => {
+    if (waiters.length) waiters.shift()!(line);
+    else queued.push(line);
+  });
+  rl.on("close", () => {
+    closed = true;
+    while (waiters.length) waiters.shift()!(null);
+  });
+
+  function readLine(prompt: string): Promise<string | null> {
+    if (queued.length) return Promise.resolve(queued.shift()!);
+    if (closed) return Promise.resolve(null);
+    if (stdout.isTTY) stdout.write(prompt);
+    return new Promise((resolve) => waiters.push(resolve));
+  }
 
   let quitting = false;
   const cleanExit = async (code = 0) => {
@@ -524,12 +738,8 @@ async function main(): Promise<void> {
   });
 
   while (true) {
-    let input: string;
-    try {
-      input = await rl.question(chalk.green("toad> "));
-    } catch {
-      break;
-    }
+    const input = await readLine(chalk.green("toad> "));
+    if (input === null) break;
     let result: "continue" | "quit";
     try {
       result = await dispatch(input);

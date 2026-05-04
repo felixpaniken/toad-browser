@@ -5,6 +5,11 @@ export type LinearizeResult = {
   actions: { id: number; text: string }[];
 };
 
+export type LinearizeOptions = {
+  hide?: string[];
+  content?: string | null;
+};
+
 // Runs inside Puppeteer's page context. Must be self-contained — no imports,
 // no closures over outer variables. Walks the DOM and emits markdown-ish text
 // with inline [N] link markers and [cN] action markers.
@@ -12,7 +17,20 @@ export type LinearizeResult = {
 // Top-level <nav>/<header>/<footer>/<aside> get demoted to a "Page chrome"
 // section after the main content. If <main> exists, it becomes the sole
 // source for main content. Identical URLs share one number.
-export function linearizeInPage(): LinearizeResult {
+export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
+  const hideSelectors = (opts.hide || []).filter(Boolean);
+  const contentSelector = opts.content || null;
+  let hideMatcher: ((el: Element) => boolean) | null = null;
+  if (hideSelectors.length > 0) {
+    const combined = hideSelectors.join(", ");
+    hideMatcher = (el: Element) => {
+      try {
+        return el.matches(combined);
+      } catch {
+        return false;
+      }
+    };
+  }
   const links: string[] = [];
   const actions: { id: number; text: string }[] = [];
   const linkMap = new Map<string, number>();
@@ -84,6 +102,7 @@ export function linearizeInPage(): LinearizeResult {
   }
 
   function isHidden(el: Element): boolean {
+    if (hideMatcher && hideMatcher(el)) return true;
     if (el.getAttribute("aria-hidden") === "true") return true;
     if ((el as HTMLElement).hidden) return true;
     const s = getComputedStyle(el);
@@ -331,8 +350,16 @@ export function linearizeInPage(): LinearizeResult {
       el.removeAttribute("data-toad-action");
     });
 
-  // Main pass: prefer <main> if present; otherwise walk body excluding top-level chrome
-  const mainEl = document.querySelector("main");
+  // Main pass: lilypad's `content` selector overrides; else <main>; else body.
+  let mainEl: Element | null = null;
+  if (contentSelector) {
+    try {
+      mainEl = document.querySelector(contentSelector);
+    } catch {
+      mainEl = null;
+    }
+  }
+  if (!mainEl) mainEl = document.querySelector("main");
   active = main;
   walkMode = "main";
   if (mainEl) {

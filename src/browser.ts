@@ -1,5 +1,8 @@
 import puppeteer, { type Browser, type Page } from "puppeteer";
-import { linearizeInPage } from "./linearize-in-page.ts";
+import {
+  linearizeInPage,
+  type LinearizeOptions,
+} from "./linearize-in-page.ts";
 
 let browser: Browser | null = null;
 let page: Page | null = null;
@@ -134,9 +137,10 @@ async function dismissConsent(p: Page): Promise<string | null> {
 async function snapshot(
   p: Page,
   httpStatus: number | null,
+  opts: LinearizeOptions = {},
 ): Promise<LoadResult> {
   const consentDismissed = await dismissConsent(p);
-  const linearized = await p.evaluate(linearizeInPage);
+  const linearized = await p.evaluate(linearizeInPage, opts);
   const html = await p.content();
   return {
     html,
@@ -151,7 +155,30 @@ async function snapshot(
   };
 }
 
-async function clickAndSnapshot(selector: string): Promise<LoadResult> {
+export type LoadOpts = {
+  resolveOptions?: (
+    hostname: string,
+  ) => Promise<LinearizeOptions> | LinearizeOptions;
+};
+
+async function resolveOpts(
+  url: string,
+  resolver: LoadOpts["resolveOptions"],
+): Promise<LinearizeOptions> {
+  if (!resolver) return {};
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    /* ignore */
+  }
+  return resolver(host);
+}
+
+async function clickAndSnapshot(
+  selector: string,
+  opts: LoadOpts = {},
+): Promise<LoadResult> {
   const p = await ensurePage();
   const el = await p.$(selector);
   if (!el) throw new Error(`Element ${selector} no longer exists on page`);
@@ -169,17 +196,104 @@ async function clickAndSnapshot(selector: string): Promise<LoadResult> {
     navP,
     new Promise<null>((r) => setTimeout(() => r(null), 1000)),
   ]);
-  return snapshot(p, response?.status() ?? null);
+  const linOpts = await resolveOpts(p.url(), opts.resolveOptions);
+  return snapshot(p, response?.status() ?? null, linOpts);
 }
 
-export async function loadPage(url: string): Promise<LoadResult> {
+export async function loadPage(
+  url: string,
+  opts: LoadOpts = {},
+): Promise<LoadResult> {
   const p = await ensurePage();
   const response = await p.goto(url, { waitUntil: "load", timeout: 15000 });
-  return snapshot(p, response?.status() ?? null);
+  const linOpts = await resolveOpts(p.url(), opts.resolveOptions);
+  return snapshot(p, response?.status() ?? null, linOpts);
 }
 
-export async function clickAction(id: number): Promise<LoadResult> {
-  return clickAndSnapshot(`[data-toad-action="${id}"]`);
+export async function clickAction(
+  id: number,
+  opts: LoadOpts = {},
+): Promise<LoadResult> {
+  return clickAndSnapshot(`[data-toad-action="${id}"]`, opts);
+}
+
+export type InspectResult = {
+  found: true;
+  text: string;
+  self: { tag: string; selector: string };
+  ancestors: {
+    tag: string;
+    selector: string;
+    classes: string[];
+    id: string | null;
+    linkCount: number;
+    actionCount: number;
+  }[];
+} | {
+  found: false;
+};
+
+export async function inspect(targetSelector: string): Promise<InspectResult> {
+  const p = await ensurePage();
+  return p.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return { found: false } as const;
+
+    function shortSelector(e: Element): string {
+      const tag = e.tagName.toLowerCase();
+      if (e.id) return `${tag}#${e.id}`;
+      const classes = (e.className && typeof e.className === "string"
+        ? e.className.trim().split(/\s+/).filter(Boolean)
+        : []
+      ).slice(0, 2);
+      if (classes.length > 0) return `${tag}.${classes.join(".")}`;
+      return tag;
+    }
+
+    function countWithin(
+      e: Element,
+    ): { linkCount: number; actionCount: number } {
+      return {
+        linkCount: e.querySelectorAll("[data-toad-link]").length,
+        actionCount: e.querySelectorAll("[data-toad-action]").length,
+      };
+    }
+
+    const text = (el.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+
+    const ancestors: InspectResult extends infer R
+      ? R extends { ancestors: infer A }
+        ? A
+        : never
+      : never = [];
+    let cur: Element | null = el.parentElement;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      const counts = countWithin(cur);
+      const classes =
+        cur.className && typeof cur.className === "string"
+          ? cur.className.trim().split(/\s+/).filter(Boolean)
+          : [];
+      ancestors.push({
+        tag: cur.tagName.toLowerCase(),
+        selector: shortSelector(cur),
+        classes,
+        id: cur.id || null,
+        linkCount: counts.linkCount,
+        actionCount: counts.actionCount,
+      });
+      cur = cur.parentElement;
+    }
+
+    return {
+      found: true,
+      text,
+      self: { tag: el.tagName.toLowerCase(), selector: shortSelector(el) },
+      ancestors,
+    } as const;
+  }, targetSelector);
 }
 
 export async function getDiagnostics(): Promise<Diagnostics> {
