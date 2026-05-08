@@ -33,11 +33,17 @@ function styleInline(text: string): string {
     .replace(/__([^_\n]+)__/g, (_, c) => chalk.bold(c))
     .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, (_, c) => chalk.italic(c))
     .replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, (_, c) => chalk.italic(c))
+    .replace(/\[(i\d+)\]/gi, (_, n) => chalk.bold.green(`[${n}]`))
     .replace(/\[(c\d+)\]/gi, (_, n) => chalk.bold.magenta(`[${n}]`))
+    .replace(/\[(f\d+)\]/gi, (_, n) => chalk.bold.blue(`[${n}]`))
     .replace(/\[(\d+)\]/g, (_, n) => chalk.bold.cyan(`[${n}]`));
 }
 
-export function render(markdown: string, width: number): string {
+export function render(
+  markdown: string,
+  width: number,
+  imageBlocks: Map<number, string> = new Map(),
+): string {
   const lines = markdown.split("\n");
   const out: string[] = [];
   let i = 0;
@@ -60,6 +66,19 @@ export function render(markdown: string, width: number): string {
 
     if (!raw.trim()) {
       out.push("");
+      i++;
+      continue;
+    }
+
+    const imgMatch = raw.match(/^\[image\b.*\[i(\d+)\]\s*$/);
+    if (imgMatch) {
+      const id = parseInt(imgMatch[1]!, 10);
+      const block = imageBlocks.get(id);
+      if (block) {
+        out.push(block);
+      } else {
+        out.push(styleInline(raw));
+      }
       i++;
       continue;
     }
@@ -153,13 +172,29 @@ export function renderActions(actions: Action[], width: number): string {
 export function renderFooter(
   linkCount: number,
   actionCount: number,
+  imageCount: number,
+  fieldCount: number,
   _width: number,
 ): string {
   const parts = [`${linkCount} link${linkCount === 1 ? "" : "s"}`];
   if (actionCount > 0) {
     parts.push(`${actionCount} action${actionCount === 1 ? "" : "s"}`);
   }
+  if (imageCount > 0) {
+    parts.push(`${imageCount} image${imageCount === 1 ? "" : "s"}`);
+  }
+  if (fieldCount > 0) {
+    parts.push(`${fieldCount} field${fieldCount === 1 ? "" : "s"}`);
+  }
   const counts = parts.join(" · ");
-  const help = `${counts} · N to follow${actionCount > 0 ? " · cN to click" : ""} · [m]ore [b]ack [f]wd [r]eload [+]bookmark [:]url [?]help [q]uit`;
+  const tail = [
+    "N to follow",
+    actionCount > 0 ? "cN to click" : null,
+    imageCount > 0 ? "iN to view" : null,
+    fieldCount > 0 ? "fN <text>" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const help = `${counts} · ${tail} · [m]ore [b]ack [f]wd [r]eload [+]bookmark [:]url [?]help [q]uit`;
   return chalk.dim(help);
 }

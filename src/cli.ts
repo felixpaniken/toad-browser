@@ -5,12 +5,16 @@ import chalk from "chalk";
 import {
   loadPage,
   clickAction,
+  fillField,
+  toggleField,
   getDiagnostics,
+  getImage,
   inspect,
   scopedHideSelector,
   shutdown,
   type LoadResult,
 } from "./browser.ts";
+import { renderImage } from "./image-render.ts";
 import { extract, type Extracted } from "./extract.ts";
 import { render, renderHeader, renderFooter, renderActions } from "./render.ts";
 import {
@@ -31,7 +35,88 @@ import {
 
 type View =
   | { kind: "startpage"; bookmarks: Bookmark[]; links: string[] }
-  | { kind: "page"; load: LoadResult; data: Extracted };
+  | {
+      kind: "page";
+      load: LoadResult;
+      data: Extracted;
+      thumbnails: Map<number, string>;
+    };
+
+const THUMB_COLS = 16;
+const THUMB_ROWS = 6;
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+function visualWidth(s: string): number {
+  return s.replace(ANSI_RE, "").length;
+}
+
+function padVisual(line: string, cols: number): string {
+  const w = visualWidth(line);
+  if (w >= cols) return line;
+  return line + " ".repeat(cols - w);
+}
+
+function wrapText(text: string, width: number): string[] {
+  if (!text.trim()) return [];
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = "";
+  for (const word of words) {
+    if (!cur) cur = word;
+    else if (cur.length + 1 + word.length <= width) cur += " " + word;
+    else {
+      lines.push(cur);
+      cur = word;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+async function composeThumbnails(
+  images: { id: number; src: string; alt: string }[],
+  width: number,
+): Promise<Map<number, string>> {
+  const blocks = new Map<number, string>();
+  if (images.length === 0) return blocks;
+  const captionWidth = Math.max(20, width - THUMB_COLS - 2);
+  const results = await Promise.all(
+    images.map(async (img) => {
+      const bytes = await getImage(img.src);
+      if (!bytes) return null;
+      try {
+        const rendered = await renderImage(bytes, THUMB_COLS, THUMB_ROWS);
+        if (!rendered) return null;
+        return { id: img.id, alt: img.alt, rendered };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  for (const result of results) {
+    if (!result) continue;
+    const imageLines = result.rendered
+      .split("\n")
+      .map((l) => padVisual(l, THUMB_COLS));
+    while (imageLines.length < THUMB_ROWS) {
+      imageLines.push(" ".repeat(THUMB_COLS));
+    }
+    const captionLines = result.alt ? wrapText(result.alt, captionWidth) : [];
+    const hint =
+      chalk.dim("view fullscreen ") +
+      chalk.bold.green(`[i${result.id}]`);
+    const rightLines = [...captionLines, "", hint];
+    const totalLines = Math.max(imageLines.length, rightLines.length);
+    const composed: string[] = [];
+    for (let i = 0; i < totalLines; i++) {
+      const left = imageLines[i] ?? " ".repeat(THUMB_COLS);
+      const right = rightLines[i] ?? "";
+      composed.push(left + "  " + right);
+    }
+    blocks.set(result.id, composed.join("\n"));
+  }
+  return blocks;
+}
 
 let current: View | null = null;
 const history = new History();
@@ -104,9 +189,10 @@ async function buildStartpage(): Promise<View> {
   return { kind: "startpage", bookmarks, links: bookmarks.map((b) => b.url) };
 }
 
-function viewFromLoad(load: LoadResult): View {
+async function viewFromLoad(load: LoadResult): Promise<View> {
   const data = extract(load);
-  return { kind: "page", load, data };
+  const thumbnails = await composeThumbnails(data.images, termWidth());
+  return { kind: "page", load, data, thumbnails };
 }
 
 function hostnameOf(url: string): string {
@@ -133,7 +219,7 @@ async function buildPage(url: string): Promise<View> {
     const load = await loadPage(norm, {
       resolveOptions: (host) => burrowOptionsFor(host),
     });
-    return viewFromLoad(load);
+    return await viewFromLoad(load);
   } finally {
     stop();
   }
@@ -145,7 +231,7 @@ async function performClickAction(actionId: number): Promise<View> {
     const load = await clickAction(actionId, {
       resolveOptions: (host) => burrowOptionsFor(host),
     });
-    return viewFromLoad(load);
+    return await viewFromLoad(load);
   } finally {
     stop();
   }
@@ -190,13 +276,19 @@ function printPage(view: Extract<View, { kind: "page" }>): void {
   }
   console.log();
 
-  const bodyLines = render(data.content, w).split("\n");
+  const bodyLines = render(data.content, w, view.thumbnails).split("\n");
   const actionsBlock = renderActions(data.actions, w);
   const lines = actionsBlock
     ? bodyLines.concat([""], actionsBlock.split("\n"))
     : bodyLines;
   const chromeLines = data.chrome ? render(data.chrome, w).split("\n") : [];
-  const helpLine = renderFooter(data.links.length, data.actions.length, w);
+  const helpLine = renderFooter(
+    data.links.length,
+    data.actions.length,
+    data.images.length,
+    data.fields.length,
+    w,
+  );
   pager = { lines, cursor: 0, chromeLines, helpLine, width: w };
   showNextChunk();
 }
@@ -307,7 +399,7 @@ async function printDebug(
   if (cur.trim()) lines.push(cur);
   for (const l of lines) console.log(chalk.dim(l));
   console.log(
-    `  Linearized:    ${view.data.links.length} links · ${view.data.actions.length} actions`,
+    `  Linearized:    ${view.data.links.length} links · ${view.data.actions.length} actions · ${view.data.images.length} images · ${view.data.fields.length} fields`,
   );
   if (view.data.consentDismissed) {
     console.log(
@@ -325,6 +417,9 @@ function printHelp(): void {
   console.log("  m         next page of long output");
   console.log("  mm        rest of long output, all at once");
   console.log("  i N      inspect link N (or i cN for action N)");
+  console.log("  iN        view image N fullscreen");
+  console.log("  fN <text> fill text input N");
+  console.log("  fN        toggle checkbox N");
   console.log("  :hide S  add selector S to this site's burrow");
   console.log("  :unhide S  remove selector S from this site's burrow");
   console.log("  :content S  set content root selector for this site");
@@ -401,6 +496,45 @@ async function printInspect(token: string): Promise<void> {
 function currentHostname(): string | null {
   if (current?.kind !== "page") return null;
   return hostnameOf(current.data.url);
+}
+
+async function viewImageFullscreen(id: number): Promise<void> {
+  if (current?.kind !== "page") {
+    console.log(chalk.dim("(no page to view)"));
+    return;
+  }
+  const img = current.data.images.find((i) => i.id === id);
+  if (!img) {
+    console.log(chalk.dim(`(no image i${id})`));
+    return;
+  }
+  const stop = startSpinner("Loading image");
+  let bytes: Buffer | null;
+  try {
+    bytes = await getImage(img.src);
+  } finally {
+    stop();
+  }
+  if (!bytes) {
+    console.log(chalk.red(`Could not fetch image i${id}`));
+    return;
+  }
+  const cols = stdout.columns || 80;
+  const rows = Math.max(20, (stdout.rows || 30) - 6);
+  let rendered = "";
+  try {
+    rendered = await renderImage(bytes, cols, rows);
+  } catch (err) {
+    console.log(chalk.red(`Render failed: ${(err as Error).message}`));
+    return;
+  }
+  console.log();
+  console.log(rendered);
+  if (img.alt) {
+    console.log();
+    console.log(chalk.dim(img.alt));
+  }
+  console.log();
 }
 
 async function printBurrow(): Promise<void> {
@@ -488,6 +622,54 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
       await printInspect(inspectMatch[1]!);
     } catch (err) {
       console.log(chalk.red((err as Error).message));
+    }
+    return "continue";
+  }
+
+  const imageMatch = cmd.match(/^i(\d+)$/i);
+  if (imageMatch) {
+    await viewImageFullscreen(parseInt(imageMatch[1]!, 10));
+    return "continue";
+  }
+
+  const fieldMatch = cmd.match(/^f(\d+)(?:\s+(.*))?$/i);
+  if (fieldMatch) {
+    if (current?.kind !== "page") {
+      console.log(chalk.dim("(no page)"));
+      return "continue";
+    }
+    const id = parseInt(fieldMatch[1]!, 10);
+    const rest = fieldMatch[2];
+    const field = current.data.fields.find((f) => f.id === id);
+    if (!field) {
+      console.log(chalk.dim(`(no field f${id})`));
+      return "continue";
+    }
+    if (field.kind === "checkbox") {
+      const ok = await toggleField(id);
+      if (!ok) {
+        console.log(chalk.red(`Could not toggle f${id}`));
+      } else {
+        field.checked = !field.checked;
+        console.log(
+          chalk.green(`f${id} → ${field.checked ? "checked" : "unchecked"}`),
+        );
+      }
+      return "continue";
+    }
+    if (rest === undefined) {
+      console.log(chalk.dim(`(usage: f${id} <text>)`));
+      return "continue";
+    }
+    const ok = await fillField(id, rest);
+    if (!ok) {
+      console.log(chalk.red(`Could not fill f${id}`));
+    } else {
+      field.value = rest;
+      const display = field.isPassword
+        ? "•".repeat(Math.min(rest.length, 12))
+        : `"${rest}"`;
+      console.log(chalk.green(`f${id} ← ${display}`));
     }
     return "continue";
   }

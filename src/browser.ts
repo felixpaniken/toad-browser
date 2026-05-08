@@ -38,7 +38,7 @@ async function ensurePage(): Promise<Page> {
     await page.setRequestInterception(true);
     page.on("request", (req) => {
       const type = req.resourceType();
-      if (type === "image" || type === "font" || type === "media") {
+      if (type === "font" || type === "media") {
         req.abort().catch(() => {});
       } else {
         req.continue().catch(() => {});
@@ -49,6 +49,15 @@ async function ensurePage(): Promise<Page> {
 }
 
 export type Action = { id: number; text: string };
+export type Image = { id: number; src: string; alt: string };
+export type Field = {
+  id: number;
+  kind: "text" | "textarea" | "checkbox";
+  label: string;
+  value: string;
+  checked: boolean;
+  isPassword: boolean;
+};
 
 export type LoadResult = {
   finalUrl: string;
@@ -57,6 +66,8 @@ export type LoadResult = {
   chromeMarkdown: string;
   links: string[];
   actions: Action[];
+  images: Image[];
+  fields: Field[];
   consentDismissed: string | null;
   httpStatus: number | null;
 };
@@ -147,12 +158,46 @@ async function dismissConsent(p: Page): Promise<string | null> {
   return result;
 }
 
+async function unlazyImages(p: Page): Promise<void> {
+  await p
+    .evaluate(() => {
+      // Flip lazy images to eager and copy any deferred URL into src.
+      const candidates = ["data-src", "data-original", "data-lazy-src", "data-srcset"];
+      for (const img of Array.from(document.querySelectorAll("img"))) {
+        const el = img as HTMLImageElement;
+        try {
+          el.loading = "eager";
+        } catch {
+          /* readonly in some envs */
+        }
+        if (!el.src || el.src.startsWith("data:")) {
+          for (const a of candidates) {
+            const v = el.getAttribute(a);
+            if (v && !v.startsWith("data:")) {
+              if (a === "data-srcset") el.setAttribute("srcset", v);
+              else el.setAttribute("src", v);
+              break;
+            }
+          }
+        }
+      }
+      // Nudge IntersectionObserver-based lazy loaders.
+      const h = document.documentElement.scrollHeight;
+      window.scrollTo(0, h);
+      window.scrollTo(0, 0);
+    })
+    .catch(() => {});
+  // Tiny grace period for lazy loaders to fire.
+  await new Promise((r) => setTimeout(r, 300));
+}
+
 async function snapshot(
   p: Page,
   httpStatus: number | null,
   opts: LinearizeOptions = {},
 ): Promise<LoadResult> {
   const consentDismissed = await dismissConsent(p);
+  await unlazyImages(p);
   const linearized = await p.evaluate(linearizeInPage, opts);
   return {
     finalUrl: p.url(),
@@ -161,6 +206,8 @@ async function snapshot(
     chromeMarkdown: linearized.chromeMarkdown,
     links: linearized.links,
     actions: linearized.actions,
+    images: linearized.images,
+    fields: linearized.fields,
     consentDismissed,
     httpStatus,
   };
@@ -226,6 +273,34 @@ export async function clickAction(
   opts: LoadOpts = {},
 ): Promise<LoadResult> {
   return clickAndSnapshot(`[data-toad-action="${id}"]`, opts);
+}
+
+export async function fillField(id: number, value: string): Promise<boolean> {
+  const p = await ensurePage();
+  const selector = `[data-toad-field="${id}"]`;
+  const el = await p.$(selector);
+  if (!el) return false;
+  try {
+    await el.click({ clickCount: 3 }).catch(() => {});
+    await p.keyboard.press("Backspace").catch(() => {});
+    await el.type(value, { delay: 0 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function toggleField(id: number): Promise<boolean> {
+  const p = await ensurePage();
+  const selector = `[data-toad-field="${id}"]`;
+  const el = await p.$(selector);
+  if (!el) return false;
+  try {
+    await el.click();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export type InspectResult = {
@@ -305,6 +380,32 @@ export async function inspect(targetSelector: string): Promise<InspectResult> {
       ancestors,
     } as const;
   }, targetSelector);
+}
+
+export async function getImage(url: string): Promise<Buffer | null> {
+  const p = await ensurePage();
+  try {
+    // Fetch from Node (no CORS rules), forwarding the page's cookies and a
+    // matching User-Agent + Referer so we look like the same client.
+    const cookies = await p.cookies(url);
+    const cookieHeader = cookies
+      .map((c) => `${c.name}=${c.value}`)
+      .join("; ");
+    const userAgent = await p
+      .evaluate(() => navigator.userAgent)
+      .catch(() => "");
+    const headers: Record<string, string> = {
+      Referer: p.url(),
+    };
+    if (cookieHeader) headers.Cookie = cookieHeader;
+    if (userAgent) headers["User-Agent"] = userAgent;
+    const res = await fetch(url, { headers });
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    return Buffer.from(buf);
+  } catch {
+    return null;
+  }
 }
 
 export async function scopedHideSelector(selector: string): Promise<string> {

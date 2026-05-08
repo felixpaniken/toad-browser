@@ -3,6 +3,15 @@ export type LinearizeResult = {
   chromeMarkdown: string;
   links: string[];
   actions: { id: number; text: string }[];
+  images: { id: number; src: string; alt: string }[];
+  fields: {
+    id: number;
+    kind: "text" | "textarea" | "checkbox";
+    label: string;
+    value: string;
+    checked: boolean;
+    isPassword: boolean;
+  }[];
 };
 
 export type LinearizeOptions = {
@@ -33,7 +42,103 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
   }
   const links: string[] = [];
   const actions: { id: number; text: string }[] = [];
+  const images: { id: number; src: string; alt: string }[] = [];
+  const fields: {
+    id: number;
+    kind: "text" | "textarea" | "checkbox";
+    label: string;
+    value: string;
+    checked: boolean;
+    isPassword: boolean;
+  }[] = [];
   const linkMap = new Map<string, number>();
+  const imageMap = new Map<string, number>();
+
+  function fieldLabel(el: Element): string {
+    const id = el.getAttribute("id");
+    if (id) {
+      const lbl = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+      const text = lbl?.textContent?.replace(/\s+/g, " ").trim();
+      if (text) return text;
+    }
+    let p: Element | null = el.parentElement;
+    while (p) {
+      if (p.tagName === "LABEL") {
+        const own = (p.textContent || "").replace(/\s+/g, " ").trim();
+        const inputText = (el.textContent || "").replace(/\s+/g, " ").trim();
+        const stripped = own.replace(inputText, "").trim();
+        if (stripped) return stripped;
+        if (own) return own;
+        break;
+      }
+      p = p.parentElement;
+    }
+    const aria = (el.getAttribute("aria-label") || "").trim();
+    if (aria) return aria;
+    const placeholder = (el.getAttribute("placeholder") || "").trim();
+    if (placeholder) return placeholder;
+    const name = (el.getAttribute("name") || "").trim();
+    if (name) return name;
+    return "";
+  }
+
+  function addField(
+    el: Element,
+    kind: "text" | "textarea" | "checkbox",
+  ): number {
+    const n = fields.length + 1;
+    const isPassword =
+      kind === "text" &&
+      (el as HTMLInputElement).type?.toLowerCase() === "password";
+    const value =
+      kind === "checkbox"
+        ? ""
+        : ((el as HTMLInputElement | HTMLTextAreaElement).value || "");
+    const checked =
+      kind === "checkbox" && (el as HTMLInputElement).checked === true;
+    fields.push({
+      id: n,
+      kind,
+      label: fieldLabel(el),
+      value,
+      checked,
+      isPassword,
+    });
+    el.setAttribute("data-toad-field", String(n));
+    return n;
+  }
+
+  function addImage(el: Element): number | null {
+    const src = el.getAttribute("src") || "";
+    if (!src) return null;
+    if (src.startsWith("data:")) return null; // skip inline base64 (icons, spacers)
+    let resolved: string;
+    try {
+      resolved = new URL(src, document.baseURI).toString();
+    } catch {
+      return null;
+    }
+    // Skip tiny tracker pixels and decorative spacers by intrinsic size if known.
+    const w = parseInt(el.getAttribute("width") || "", 10);
+    const h = parseInt(el.getAttribute("height") || "", 10);
+    if (
+      Number.isFinite(w) &&
+      Number.isFinite(h) &&
+      w > 0 &&
+      h > 0 &&
+      (w < 32 || h < 32)
+    ) {
+      return null;
+    }
+    let n = imageMap.get(resolved);
+    if (n === undefined) {
+      const alt = (el.getAttribute("alt") || "").trim();
+      n = images.length + 1;
+      images.push({ id: n, src: resolved, alt });
+      imageMap.set(resolved, n);
+    }
+    return n;
+  }
 
   type Section = { lines: string[]; buf: string };
   const main: Section = { lines: [], buf: "" };
@@ -180,7 +285,9 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
     const tag = el.tagName;
 
     if (SKIP.has(tag)) return;
-    if (isHidden(el)) return;
+    // <img> is allowed even if "hidden" — many sites lazy-load with zero size
+    // until in viewport, but the URL is still there and we want it.
+    if (tag !== "IMG" && isHidden(el)) return;
 
     // In main pass, skip top-level chrome (it'll be rendered in the chrome pass)
     if (walkMode === "main" && isPageLevelChrome(el)) return;
@@ -252,10 +359,11 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
         return;
       }
       case "INPUT": {
-        const type = ((el as HTMLInputElement).type || "").toLowerCase();
+        const input = el as HTMLInputElement;
+        const type = (input.type || "text").toLowerCase();
         if (type === "submit" || type === "button") {
           const aria = (el.getAttribute("aria-label") || "").trim();
-          let text = aria || (el as HTMLInputElement).value || "Submit";
+          let text = aria || input.value || "Submit";
           text = text.trim();
           if (!text || text.length > 100) return;
           actions.push({ id: actions.length + 1, text });
@@ -263,9 +371,54 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
           el.setAttribute("data-toad-action", String(n));
           if (active.buf && !/\s$/.test(active.buf)) active.buf += " ";
           active.buf += "[c" + n + "] " + text + " ";
+          return;
         }
+        if (type === "hidden" || type === "file" || type === "image") return;
+        if (input.disabled) return;
+        if (type === "checkbox") {
+          const n = addField(el, "checkbox");
+          const f = fields[n - 1]!;
+          const box = f.checked ? "☑" : "☐";
+          if (active.buf && !/\s$/.test(active.buf)) active.buf += " ";
+          active.buf += `[f${n}] ${box} ${f.label || ""} `.trimEnd() + " ";
+          return;
+        }
+        if (type === "radio") return; // skip for now
+        // text-like: text, search, email, url, tel, number, password, date...
+        const n = addField(el, "text");
+        const f = fields[n - 1]!;
+        const display = f.isPassword
+          ? f.value
+            ? "•".repeat(Math.min(f.value.length, 12))
+            : "(empty)"
+          : f.value
+            ? `"${f.value}"`
+            : "(empty)";
+        pushBuf();
+        active.buf = f.label
+          ? `${f.label}: [f${n}] ${display}`
+          : `[f${n}] ${display}`;
+        pushBuf();
         return;
       }
+      case "TEXTAREA": {
+        const ta = el as HTMLTextAreaElement;
+        if (ta.disabled) return;
+        const n = addField(el, "textarea");
+        const f = fields[n - 1]!;
+        const preview = f.value
+          ? `"${f.value.replace(/\s+/g, " ").slice(0, 60)}${f.value.length > 60 ? "…" : ""}"`
+          : "(empty)";
+        pushBuf();
+        active.buf = f.label
+          ? `${f.label}: [f${n}] ${preview}`
+          : `[f${n}] ${preview}`;
+        pushBuf();
+        return;
+      }
+      case "SELECT":
+      case "OPTION":
+        return; // not supported yet
       case "STRONG":
       case "B": {
         active.buf += "**";
@@ -338,10 +491,14 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
         return;
       }
       case "IMG": {
-        const alt = el.getAttribute("alt");
-        if (alt && alt.trim()) {
-          active.buf += "[image: " + alt.trim() + "]";
-        }
+        const n = addImage(el);
+        if (n === null) return;
+        const alt = (el.getAttribute("alt") || "").trim();
+        pushBuf();
+        active.buf = alt
+          ? `[image: ${alt}] [i${n}]`
+          : `[image] [i${n}]`;
+        pushBuf();
         return;
       }
       default: {
@@ -510,5 +667,7 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
     chromeMarkdown: chromeLines.join("\n"),
     links,
     actions,
+    images,
+    fields,
   };
 }
