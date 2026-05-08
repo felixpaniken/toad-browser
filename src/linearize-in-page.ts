@@ -147,6 +147,24 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
     return "";
   }
 
+  // Actions (buttons) prefer aria-label over text content. Many sites use
+  // text-light buttons (icons, durations, prices) where aria-label carries
+  // the real semantic meaning ("Listen to article 0:49 min" vs. "0:49").
+  function readActionLabel(el: Element): string {
+    const aria = (el.getAttribute("aria-label") || "").trim();
+    if (aria) return aria;
+    const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+    if (text) return text;
+    const title = (el.getAttribute("title") || "").trim();
+    if (title) return title;
+    const img = el.querySelector("img");
+    if (img) {
+      const alt = (img.getAttribute("alt") || "").trim();
+      if (alt) return alt;
+    }
+    return "";
+  }
+
   function walkChildren(el: Element): void {
     for (const child of Array.from(el.childNodes)) walk(child);
   }
@@ -224,7 +242,7 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
       }
       case "BUTTON":
       case "SUMMARY": {
-        const text = readLabel(el);
+        const text = readActionLabel(el);
         if (!text || text.length > 100) return;
         actions.push({ id: actions.length + 1, text });
         const n = actions.length;
@@ -236,8 +254,8 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
       case "INPUT": {
         const type = ((el as HTMLInputElement).type || "").toLowerCase();
         if (type === "submit" || type === "button") {
-          let text = (el as HTMLInputElement).value || "";
-          if (!text) text = el.getAttribute("aria-label") || "Submit";
+          const aria = (el.getAttribute("aria-label") || "").trim();
+          let text = aria || (el as HTMLInputElement).value || "Submit";
           text = text.trim();
           if (!text || text.length > 100) return;
           actions.push({ id: actions.length + 1, text });
@@ -421,7 +439,7 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
       }
 
       if (tag === "BUTTON" || tag === "SUMMARY") {
-        const text = readLabel(e);
+        const text = readActionLabel(e);
         if (!text || text.length > 100) return;
         actions.push({ id: actions.length + 1, text });
         const n = actions.length;
@@ -433,8 +451,8 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
       if (tag === "INPUT") {
         const type = ((e as HTMLInputElement).type || "").toLowerCase();
         if (type === "submit" || type === "button") {
-          let text = (e as HTMLInputElement).value || "";
-          if (!text) text = e.getAttribute("aria-label") || "Submit";
+          const aria = (e.getAttribute("aria-label") || "").trim();
+          let text = aria || (e as HTMLInputElement).value || "Submit";
           text = text.trim();
           if (!text || text.length > 100) return;
           actions.push({ id: actions.length + 1, text });

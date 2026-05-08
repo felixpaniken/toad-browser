@@ -307,6 +307,95 @@ export async function inspect(targetSelector: string): Promise<InspectResult> {
   }, targetSelector);
 }
 
+export async function scopedHideSelector(selector: string): Promise<string> {
+  const p = await ensurePage();
+  return p.evaluate((sel) => {
+    let target: Element | null = null;
+    try {
+      target = document.querySelector(sel);
+    } catch {
+      return sel;
+    }
+    if (!target) return sel;
+
+    const SEMANTIC_TAGS = new Set([
+      "MAIN",
+      "NAV",
+      "ARTICLE",
+      "SECTION",
+      "ASIDE",
+      "HEADER",
+      "FOOTER",
+    ]);
+
+    function isUtilityClass(c: string): boolean {
+      if (c.length <= 2) return true;
+      // Tailwind-ish prefixes: text-, bg-, p-, m-, w-, gap-, flex-, etc.
+      if (
+        /^(text|bg|border|ring|shadow|opacity|p|m|w|h|gap|space|inset|top|left|right|bottom|max|min|grid|flex|col|row|items|justify|self|content|place|object|order|z|leading|tracking|font|whitespace|break|cursor|pointer|select|resize|scroll|overflow|overscroll|aspect|columns|divide|fill|stroke|backdrop|filter)-/.test(
+          c,
+        )
+      )
+        return true;
+      // State variants: hover:, focus:, md:, dark:, etc.
+      if (
+        /^(hover|focus|active|disabled|group|peer|dark|light|md|sm|lg|xl|2xl|first|last|odd|even|empty|checked|visited|target):/.test(
+          c,
+        )
+      )
+        return true;
+      // Layout primitives by exact match
+      if (
+        /^(flex|grid|block|inline|inline-block|inline-flex|hidden|relative|absolute|fixed|sticky|static|truncate|rounded|underline|overline|italic|uppercase|lowercase|capitalize|antialiased|visible|invisible|isolate|group|peer)$/.test(
+          c,
+        )
+      )
+        return true;
+      // Numeric suffix (gap-05, mb-1, pl-4)
+      if (/-\d+$/.test(c)) return true;
+      // Auto-generated CSS-in-JS hashes
+      if (/^(css|sc|jsx|emotion|styled)-[a-z0-9]{4,}$/i.test(c)) return true;
+      if (/^_[a-zA-Z0-9]{5,}$/.test(c)) return true;
+      return false;
+    }
+
+    function semanticClasses(el: Element): string[] {
+      const raw =
+        el.className && typeof el.className === "string"
+          ? el.className.trim().split(/\s+/).filter(Boolean)
+          : [];
+      return raw.filter((c) => !isUtilityClass(c));
+    }
+
+    function ancestorSelector(el: Element): string | null {
+      if (el.id) return "#" + CSS.escape(el.id);
+      const semantic = semanticClasses(el);
+      if (semantic.length > 0) {
+        return "." + semantic.map((c) => CSS.escape(c)).join(".");
+      }
+      if (SEMANTIC_TAGS.has(el.tagName)) {
+        return el.tagName.toLowerCase();
+      }
+      return null;
+    }
+
+    let cur: Element | null = target.parentElement;
+    let depth = 0;
+    while (
+      cur &&
+      cur !== document.body &&
+      cur !== document.documentElement &&
+      depth < 6
+    ) {
+      const ancestorSel = ancestorSelector(cur);
+      if (ancestorSel) return `${ancestorSel} ${sel}`;
+      cur = cur.parentElement;
+      depth++;
+    }
+    return sel;
+  }, selector);
+}
+
 export async function getDiagnostics(): Promise<Diagnostics> {
   const p = await ensurePage();
   return p.evaluate(() => {

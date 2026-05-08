@@ -7,6 +7,7 @@ import {
   clickAction,
   getDiagnostics,
   inspect,
+  scopedHideSelector,
   shutdown,
   type LoadResult,
 } from "./browser.ts";
@@ -507,9 +508,10 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
       console.log(chalk.dim("(usage: :hide <selector>)"));
       return "continue";
     }
-    await addHide(host, selector);
+    const scoped = await scopedHideSelector(selector);
+    await addHide(host, scoped);
     console.log(
-      chalk.green(`Added "${selector}" to ${host}'s burrow. Reload (r) to apply.`),
+      chalk.green(`Added "${scoped}" to ${host}'s burrow. Reload (r) to apply.`),
     );
     return "continue";
   }
