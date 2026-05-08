@@ -10,7 +10,7 @@ import {
   shutdown,
   type LoadResult,
 } from "./browser.ts";
-import { extract, type Extracted, type Mode } from "./extract.ts";
+import { extract, type Extracted } from "./extract.ts";
 import { render, renderHeader, renderFooter, renderActions } from "./render.ts";
 import {
   loadBookmarks,
@@ -21,13 +21,12 @@ import {
 import { History, type HistoryEntry } from "./history.ts";
 import { startSpinner } from "./spinner.ts";
 import {
-  loadLilypad,
+  loadBurrow,
   addHide,
   removeHide,
   setContent,
-  lilypadPath,
-  type Lilypad,
-} from "./lilypad.ts";
+  burrowPath,
+} from "./burrow.ts";
 
 type View =
   | { kind: "startpage"; bookmarks: Bookmark[]; links: string[] }
@@ -104,8 +103,8 @@ async function buildStartpage(): Promise<View> {
   return { kind: "startpage", bookmarks, links: bookmarks.map((b) => b.url) };
 }
 
-function viewFromLoad(load: LoadResult, mode: Mode = "page"): View {
-  const data = extract(load, mode);
+function viewFromLoad(load: LoadResult): View {
+  const data = extract(load);
   return { kind: "page", load, data };
 }
 
@@ -117,13 +116,13 @@ function hostnameOf(url: string): string {
   }
 }
 
-async function lilypadOptionsFor(host: string): Promise<{
+async function burrowOptionsFor(host: string): Promise<{
   hide: string[];
   content: string | null;
 }> {
   if (!host) return { hide: [], content: null };
-  const pad = await loadLilypad(host);
-  return { hide: pad.hide, content: pad.content };
+  const burrow = await loadBurrow(host);
+  return { hide: burrow.hide, content: burrow.content };
 }
 
 async function buildPage(url: string): Promise<View> {
@@ -131,7 +130,7 @@ async function buildPage(url: string): Promise<View> {
   const stop = startSpinner("Toading");
   try {
     const load = await loadPage(norm, {
-      resolveOptions: (host) => lilypadOptionsFor(host),
+      resolveOptions: (host) => burrowOptionsFor(host),
     });
     return viewFromLoad(load);
   } finally {
@@ -143,7 +142,7 @@ async function performClickAction(actionId: number): Promise<View> {
   const stop = startSpinner("Toading");
   try {
     const load = await clickAction(actionId, {
-      resolveOptions: (host) => lilypadOptionsFor(host),
+      resolveOptions: (host) => burrowOptionsFor(host),
     });
     return viewFromLoad(load);
   } finally {
@@ -182,14 +181,11 @@ function printPage(view: Extract<View, { kind: "page" }>): void {
   const w = termWidth();
   const { data } = view;
   console.log();
-  console.log(renderHeader(data.title, data.url, data.byline, data.mode, w));
+  console.log(renderHeader(data.title, data.url, w));
   if (data.consentDismissed) {
     console.log(
       chalk.dim(`(auto-dismissed cookie banner: "${data.consentDismissed}")`),
     );
-  }
-  if (data.mode === "reader" && !data.readerAvailable) {
-    console.log(chalk.yellow("(no readable article found — showing page view)"));
   }
   console.log();
 
@@ -199,12 +195,7 @@ function printPage(view: Extract<View, { kind: "page" }>): void {
     ? bodyLines.concat([""], actionsBlock.split("\n"))
     : bodyLines;
   const chromeLines = data.chrome ? render(data.chrome, w).split("\n") : [];
-  const helpLine = renderFooter(
-    data.links.length,
-    data.actions.length,
-    data.mode,
-    w,
-  );
+  const helpLine = renderFooter(data.links.length, data.actions.length, w);
   pager = { lines, cursor: 0, chromeLines, helpLine, width: w };
   showNextChunk();
 }
@@ -325,20 +316,6 @@ async function printDebug(
   console.log();
 }
 
-function toggleReader(): void {
-  if (current?.kind !== "page") {
-    console.log(chalk.dim("(no page to toggle)"));
-    return;
-  }
-  const nextMode: Mode = current.data.mode === "reader" ? "page" : "reader";
-  current = {
-    kind: "page",
-    load: current.load,
-    data: extract(current.load, nextMode),
-  };
-  printCurrent();
-}
-
 function printHelp(): void {
   console.log();
   console.log(chalk.bold("Commands:"));
@@ -346,12 +323,11 @@ function printHelp(): void {
   console.log("  cN        click action (button) number N");
   console.log("  m         next page of long output");
   console.log("  mm        rest of long output, all at once");
-  console.log("  R         toggle reader mode for current page");
   console.log("  i N      inspect link N (or i cN for action N)");
-  console.log("  :hide S  add selector S to this site's lilypad");
-  console.log("  :unhide S  remove selector S from this site's lilypad");
+  console.log("  :hide S  add selector S to this site's burrow");
+  console.log("  :unhide S  remove selector S from this site's burrow");
   console.log("  :content S  set content root selector for this site");
-  console.log("  :lilypad  show this site's lilypad rules");
+  console.log("  :burrow  show this site's burrow rules");
   console.log("  :debug    show DOM/HTTP diagnostics for current page");
   console.log("  :URL      go to URL");
   console.log("  b         back");
@@ -426,23 +402,23 @@ function currentHostname(): string | null {
   return hostnameOf(current.data.url);
 }
 
-async function printLilypad(): Promise<void> {
+async function printBurrow(): Promise<void> {
   const host = currentHostname();
   if (!host) {
     console.log(chalk.dim("(no page loaded)"));
     return;
   }
-  const pad = await loadLilypad(host);
+  const burrow = await loadBurrow(host);
   console.log();
-  console.log(chalk.bold(`Lilypad for ${host}`));
-  console.log(chalk.dim(lilypadPath(host)));
-  if (pad.hide.length === 0 && !pad.content) {
+  console.log(chalk.bold(`Burrow for ${host}`));
+  console.log(chalk.dim(burrowPath(host)));
+  if (burrow.hide.length === 0 && !burrow.content) {
     console.log(chalk.dim("  (no rules — add some with :hide or :content)"));
   } else {
-    if (pad.content) console.log(`  content: ${chalk.cyan(pad.content)}`);
-    if (pad.hide.length > 0) {
+    if (burrow.content) console.log(`  content: ${chalk.cyan(burrow.content)}`);
+    if (burrow.hide.length > 0) {
       console.log(`  hide:`);
-      for (const s of pad.hide) console.log(`    ${chalk.cyan(s)}`);
+      for (const s of burrow.hide) console.log(`    ${chalk.cyan(s)}`);
     }
   }
   console.log();
@@ -492,11 +468,6 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
     return "continue";
   }
 
-  if (cmd === "R" || cmd === "reader") {
-    toggleReader();
-    return "continue";
-  }
-
   if (cmd === ":debug" || cmd === "debug") {
     if (current?.kind !== "page") {
       console.log(chalk.dim("(no page loaded — go somewhere first)"));
@@ -520,8 +491,8 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
     return "continue";
   }
 
-  if (cmd === ":lilypad" || cmd === "lilypad") {
-    await printLilypad();
+  if (cmd === ":burrow" || cmd === "burrow") {
+    await printBurrow();
     return "continue";
   }
 
@@ -538,7 +509,7 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
     }
     await addHide(host, selector);
     console.log(
-      chalk.green(`Added "${selector}" to ${host}'s lilypad. Reload (r) to apply.`),
+      chalk.green(`Added "${selector}" to ${host}'s burrow. Reload (r) to apply.`),
     );
     return "continue";
   }
@@ -556,7 +527,7 @@ async function dispatch(input: string): Promise<"continue" | "quit"> {
     }
     await removeHide(host, selector);
     console.log(
-      chalk.green(`Removed "${selector}" from ${host}'s lilypad. Reload (r) to apply.`),
+      chalk.green(`Removed "${selector}" from ${host}'s burrow. Reload (r) to apply.`),
     );
     return "continue";
   }
@@ -738,7 +709,7 @@ async function main(): Promise<void> {
   });
 
   while (true) {
-    const input = await readLine(chalk.green("toad> "));
+    const input = await readLine(`🐸  ${chalk.green("toad>")} `);
     if (input === null) break;
     let result: "continue" | "quit";
     try {

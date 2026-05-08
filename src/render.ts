@@ -33,7 +33,8 @@ function styleInline(text: string): string {
     .replace(/__([^_\n]+)__/g, (_, c) => chalk.bold(c))
     .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, (_, c) => chalk.italic(c))
     .replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, (_, c) => chalk.italic(c))
-    .replace(/\[(\d+)\]/g, (_, n) => chalk.cyan(`[${n}]`));
+    .replace(/\[(c\d+)\]/gi, (_, n) => chalk.bold.magenta(`[${n}]`))
+    .replace(/\[(\d+)\]/g, (_, n) => chalk.bold.cyan(`[${n}]`));
 }
 
 export function render(markdown: string, width: number): string {
@@ -67,16 +68,17 @@ export function render(markdown: string, width: number): string {
     if (heading) {
       const level = heading[1]!.length;
       const text = heading[2]!.trim();
+      const styled = styleInline(text);
       if (level === 1) {
         out.push("");
-        out.push(chalk.bold.cyan(text));
-        out.push(chalk.cyan("─".repeat(Math.min(text.length, width))));
+        out.push(chalk.bold(styled));
+        out.push(chalk.dim("─".repeat(Math.min(text.length, width))));
       } else if (level === 2) {
         out.push("");
-        out.push(chalk.bold.green("## " + text));
+        out.push(chalk.dim("## ") + chalk.bold(styled));
       } else {
         out.push("");
-        out.push(chalk.bold(text));
+        out.push(chalk.bold(styled));
       }
       i++;
       continue;
@@ -123,21 +125,15 @@ export function render(markdown: string, width: number): string {
 }
 
 import type { Action } from "./browser.ts";
-import type { Mode } from "./extract.ts";
 
 export function renderHeader(
   title: string,
   url: string,
-  byline: string | null,
-  mode: Mode,
   width: number,
 ): string {
   const lines: string[] = [];
   lines.push(chalk.bold.cyan(title));
-  const meta = [byline, new URL(url).hostname, mode]
-    .filter(Boolean)
-    .join(" · ");
-  if (meta) lines.push(chalk.dim(meta));
+  lines.push(chalk.dim(new URL(url).hostname));
   lines.push(chalk.dim("─".repeat(width)));
   return lines.join("\n");
 }
@@ -157,7 +153,6 @@ export function renderActions(actions: Action[], width: number): string {
 export function renderFooter(
   linkCount: number,
   actionCount: number,
-  mode: Mode,
   _width: number,
 ): string {
   const parts = [`${linkCount} link${linkCount === 1 ? "" : "s"}`];
@@ -165,7 +160,6 @@ export function renderFooter(
     parts.push(`${actionCount} action${actionCount === 1 ? "" : "s"}`);
   }
   const counts = parts.join(" · ");
-  const modeHint = mode === "reader" ? "[R]exit-reader" : "[R]eader";
-  const help = `${counts} · N to follow${actionCount > 0 ? " · cN to click" : ""} · [m]ore [b]ack [f]wd [r]eload [+]bookmark [:]url ${modeHint} [?]help [q]uit`;
+  const help = `${counts} · N to follow${actionCount > 0 ? " · cN to click" : ""} · [m]ore [b]ack [f]wd [r]eload [+]bookmark [:]url [?]help [q]uit`;
   return chalk.dim(help);
 }

@@ -11,7 +11,21 @@ async function ensurePage(): Promise<Page> {
   if (!browser) {
     browser = await puppeteer.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-domain-reliability",
+        "--disable-sync",
+        "--no-default-browser-check",
+        "--no-first-run",
+        "--no-pings",
+        "--safebrowsing-disable-auto-update",
+        "--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider",
+        "--metrics-recording-only",
+      ],
     });
   }
   if (!page) {
@@ -37,7 +51,6 @@ async function ensurePage(): Promise<Page> {
 export type Action = { id: number; text: string };
 
 export type LoadResult = {
-  html: string;
   finalUrl: string;
   title: string;
   markdown: string;
@@ -141,9 +154,7 @@ async function snapshot(
 ): Promise<LoadResult> {
   const consentDismissed = await dismissConsent(p);
   const linearized = await p.evaluate(linearizeInPage, opts);
-  const html = await p.content();
   return {
-    html,
     finalUrl: p.url(),
     title: await p.title(),
     markdown: linearized.markdown,

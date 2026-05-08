@@ -4,13 +4,13 @@ const FRAMES = ["|", "/", "-", "\\"];
 
 export function startSpinner(message = "Toading"): () => void {
   if (!process.stdout.isTTY) {
-    process.stdout.write(chalk.dim(message + "...\n"));
+    process.stdout.write(chalk.dim("🐸  " + message + "...\n"));
     return () => {};
   }
   let i = 0;
   const render = () => {
     const frame = FRAMES[i % FRAMES.length];
-    process.stdout.write(`\r${chalk.dim(message)} ${chalk.cyan(frame)}`);
+    process.stdout.write(`\r🐸  ${chalk.dim(message)} ${chalk.cyan(frame)}`);
     i++;
   };
   render();

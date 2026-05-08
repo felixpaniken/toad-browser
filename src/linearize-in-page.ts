@@ -350,7 +350,7 @@ export function linearizeInPage(opts: LinearizeOptions = {}): LinearizeResult {
       el.removeAttribute("data-toad-action");
     });
 
-  // Main pass: lilypad's `content` selector overrides; else <main>; else body.
+  // Main pass: burrow's `content` selector overrides; else <main>; else body.
   let mainEl: Element | null = null;
   if (contentSelector) {
     try {
